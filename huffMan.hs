@@ -3,6 +3,9 @@ import System.IO
 import Data.List
 import Data.Maybe
 import Data.Bits
+import Data.Ord
+import Data.Word
+import Data.Char
 import qualified Data.ByteString as B
 import Test.QuickCheck
 import qualified Data.Map as Map
@@ -24,7 +27,6 @@ compressAndDecompressFile fp = do f<- readFile fp
                                   putStrLn $ (take 4 $ show (((fromInteger compressedFile)/( fromInteger originalFile))*100 ))++"% of original size"
                                   putStrLn ("Done")
 
-
 getFileSize :: FilePath -> IO Integer
 getFileSize x = do handle <- openFile x ReadMode
                    size <- hFileSize handle
@@ -35,25 +37,23 @@ getFileSize x = do handle <- openFile x ReadMode
 
 --calculates the frequency of characters from a string
 readAllFromString :: String -> [(Char,Int)]
-readAllFromString str = map (\x -> (head x, length x)) (group $ sort str)
+readAllFromString str = Map.toList $ Map.fromListWith (+) (map (\x -> (x,1))str)
 
 --tests the readAllFromString function
 props_readAllFromString :: String -> Bool
 props_readAllFromString str = props_readAllFromString' str  (readAllFromString str) where
   props_readAllFromString' [] _     = True
-  props_readAllFromString' (x:xs) l = head [snd y|y <- l, fst y == x] == length (filter (== x) (x:xs)) &&
+  props_readAllFromString' (x:xs) l = head [i |(c,i) <- l, c == x] == length (filter (== x) (x:xs)) &&
                                       props_readAllFromString' (filter (/=x) xs) l
-
 
 --Sort a list of frequencyTupels
 sortList :: [(Char,Int)] -> [(Char,Int)]
-sortList l = sortBy smallest l where
-  smallest a b  | snd a < snd b = LT
-                | otherwise = GT
+sortList l = sortOn snd l
 
 --tests the sortList function
 props_sortList :: [(Char,Int)] -> Bool
-props_sortList list = sort [snd x | x <- sortList list] == [snd x | x <- sortList list]
+props_sortList list = sort [i | (c,i) <- sortList list] == [ i | (c,i) <- sortList list]
+
 
 
 ------------------------------------Creates the HuffmanTree--------------------------------------------
@@ -62,27 +62,26 @@ props_sortList list = sort [snd x | x <- sortList list] == [snd x | x <- sortLis
 data HuffTree = Leaf (Char,Int) | Tree Int HuffTree HuffTree | Empty | Stop Int
   deriving Show
 
+frequenc :: HuffTree -> Int
+frequenc (Leaf (c,i))     = i
+frequenc (Tree i _ _)     = i
+frequenc _                = 1
+
 --Insert values into tree, the smallest values at the bottom of the tree and the most common in the top.
 makeTree :: [(Char,Int)] -> HuffTree
 makeTree l = makeTree' ((Stop 1):(map Leaf l)) where
   makeTree' []         = Empty
   makeTree' (x:[])     = x
-  makeTree' (x1:x2:xs) = makeTree' $ inserTree (addSubTree (x1:x2:xs)) xs
+  makeTree' (x1:x2:xs) = makeTree' $ inserTree (addSubTree x1 x2 ) xs
 
 --Inserts a tree in the list of all the trees, in the correct order in regard to frequencie
 inserTree :: HuffTree -> [HuffTree] -> [HuffTree]
-inserTree (Tree i t1 t2) []                  = [(Tree i t1 t2)]
-inserTree (Tree i t1 t2) ((Leaf (c,v)):xs)   = if v < i then (Leaf (c,v)):(inserTree (Tree i t1 t2) xs) else (Tree i t1 t2):(Leaf (c,v)):xs
-inserTree (Tree i t1 t2) ((Tree v t3 t4):xs) = if v < i then (Tree v t3 t4):(inserTree (Tree i t1 t2) xs) else (Tree i t1 t2):(Tree v t3 t4):xs
+inserTree t lT = insertBy (comparing frequenc) t lT
 
 --takes the first two trees in a list and combines them to a tree, with the first tree in the list as leftchild
 --and the second tree in the list as rightChild
-addSubTree :: [HuffTree] -> HuffTree
-addSubTree ((Stop i):(Leaf l2):xs) =  Tree (i + snd l2) (Stop i) (Leaf l2)
-addSubTree ((Leaf l1):(Leaf l2):xs) =  Tree (snd l1 + snd l2) (Leaf l1) (Leaf l2)
-addSubTree ((Tree i t1 t2):(Leaf l):xs) = Tree (i + snd l) ((Tree i t1 t2)) (Leaf l)
-addSubTree ((Leaf l):(Tree i t1 t2):xs)  = Tree (i + snd l) (Leaf l) ((Tree i t1 t2))
-addSubTree ((Tree i1 t1 t2):(Tree i2 t3 t4):xs)  = Tree (i1 + i2) (Tree i1 t1 t2) ((Tree i2 t3 t4))
+addSubTree :: HuffTree -> HuffTree -> HuffTree
+addSubTree t1 t2 = Tree (frequenc t1 + frequenc t2) t1 t2
 
 -----------------------------------------Compress the file---------------------------------------------------
 
@@ -90,8 +89,7 @@ addSubTree ((Tree i1 t1 t2):(Tree i2 t3 t4):xs)  = Tree (i1 + i2) (Tree i1 t1 t2
 createMap :: [(Char,Int)] -> HuffTree -> Map.Map (Maybe Char) String
 createMap l tree = createMap' l Map.empty tree where
   createMap' []         m t = (Map.insert Nothing (fromJust $ traverseTree Nothing t) m)
-  createMap' (tup:tups) m t =  createMap' tups (Map.insert (Just (fst tup)) (fromJust $ traverseTree (Just (fst tup)) t) m) t
-
+  createMap' ((c,i):tups) m t =  createMap' tups (Map.insert (Just c) (fromJust $ traverseTree (Just c) t) m) t
 
 --traverses the tree to find the correct character and returns a string representing the "path" in the tree,
 -- if it goes left a 0 is given and for right a 1
@@ -104,22 +102,22 @@ traverseTree' (Just c) (Stop i) s       = Nothing
 traverseTree' Nothing  (Stop i) s       = Just s
 traverseTree' Nothing  (Leaf _) s       = Nothing
 
---Compresses The string given a string and a frequency Map for that string
+--Compresses The string given a string and a path map for each character for that string
 compressString :: String -> Map.Map (Maybe Char) String ->  String
 compressString []     m = (m Map.! Nothing)
-compressString (x:xs) m = (m Map.! (Just x))++(compressString xs m)
+compressString (x:xs) m = (m Map.! Just x)++(compressString xs m)
 
 --converts a string of size 8 of 0's and 1's to a byteString to minimise the amount of bits used
-stringToByteString8bit :: String -> B.ByteString
+stringToByteString8bit :: String -> Word8
 stringToByteString8bit str = stringToByteString8bit' str zeroBits 0 where
-  stringToByteString8bit' []       b _ = B.singleton b
+  stringToByteString8bit' []       b _ = b
   stringToByteString8bit' ('0':xs) b i = stringToByteString8bit' xs b (i+1)
   stringToByteString8bit' ('1':xs) b i = stringToByteString8bit' xs ( setBit b i) (i+1)
 
 --converts the whole string to a bytestring
 convertToByte :: String -> B.ByteString
-convertToByte str = convertToByte' str [B.empty] where
-  convertToByte' []  l = B.reverse $ B.concat l
+convertToByte str = convertToByte' str [] where
+  convertToByte' []  l = B.reverse $ B.pack l
   convertToByte' str l = convertToByte' (drop 8 str)  ((stringToByteString8bit $ take 8 str):l)
 
 --for testing pruposes, convertToByte is used in real scenarios
@@ -127,8 +125,6 @@ compress :: String -> String
 compress str = compressString str ( createMap (readAllFromString str) (makeTree $ sortList (readAllFromString str)))
 
 --TODO: Add tree to file
-
---codeTree
 
 --------------------------------------Decompress the file ---------------------------------------------------
 
